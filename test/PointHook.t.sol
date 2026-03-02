@@ -14,6 +14,7 @@ import {
     ModifyLiquidityParams
 } from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {IHooks} from "v4-core/interfaces/IHooks.sol";
 
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolId} from "v4-core/types/PoolId.sol";
@@ -36,6 +37,64 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
     PointsHook hook;
 
     function setUp() public {
-        // TODO
+        // step 1 +2
+        //deploy poolmanager and router contracts
+        deployFreshManagerAndRouters();
+
+        // Deploy TOKENS contract
+        token = new MockERC20("USD Coin", "USDC", 18);
+        tokenCurrency = Currency.wrap(address(token));
+
+        //mint a tokens to overselve and address(1)
+        token.mint(address(this), type(uint128).max);
+        token.mint(address(1), type(uint128).max);
+
+        // Deploy hook to a address that has proper flags set
+        uint160 flags = uint160(
+            Hooks.AFTER_SWAP_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
+        );
+        deployCodeTo("PointsHook", abi.encode(manager), address(flags));
+
+        hook = PointsHook(address(flags));
+
+        //appove our token for spending on the swap router and modify liquidity router
+        //this varables are coming from the depltoers contract
+
+        token.approve(address(swapRouter), type(uint128).max);
+        token.approve(address(modifyLiquidityRouter), type(uint128).max);
+
+        (key, ) = initPool(
+            ethCurrency,
+            tokenCurrency,
+            IHooks(address(hook)),
+            3000,
+            SQRT_PRICE_1_1
+        );
+
+        //add some liqudiity to the pool
+        uint160 sqrtPriceAtTickLower = TickMath.getSqrtPriceAtTick(-60);
+        uint160 sqrtPriceAtTickUpper = TickMath.getSqrtPriceAtTick(60);
+
+        uint256 ethToAdd = 0.003 ether;
+        uint128 liquidityDelta = LiquidityAmounts.getLiquidityForAmount0(
+            SQRT_PRICE_1_1,
+            sqrtPriceAtTickUpper,
+            ethToAdd
+        );
+        uint256 tokenToAdd = LiquidityAmounts.getAmount1ForLiquidity(
+            sqrtPriceAtTickLower,
+            SQRT_PRICE_1_1,
+            liquidityDelta
+        );
+        modifyLiquidityRouter.modifyLiquidity{value: ethToAdd}(
+            key,
+            ModifyLiquidityParams({
+                tickLower: -60,
+                tickUpper: 60,
+                liquidityDelta: int256(uint256(liquidityDelta)),
+                salt: bytes32(0)
+            }),
+            ZERO_BYTES
+        );
     }
 }
