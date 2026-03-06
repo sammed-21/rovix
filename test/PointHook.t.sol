@@ -9,10 +9,7 @@ import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {PoolManager} from "v4-core/PoolManager.sol";
-import {
-    SwapParams,
-    ModifyLiquidityParams
-} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 
@@ -88,7 +85,7 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
         );
         modifyLiquidityRouter.modifyLiquidity{value: ethToAdd}(
             key,
-            ModifyLiquidityParams({
+            IPoolManager.ModifyLiquidityParams({
                 tickLower: -60,
                 tickUpper: 60,
                 liquidityDelta: int256(uint256(liquidityDelta)),
@@ -96,5 +93,40 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
             }),
             ZERO_BYTES
         );
+    }
+
+    function test_swap() public {
+        uint256 poolIdUnit = uint256(PoolId.unwrap(key.toId()));
+        uint256 pointsBalanceOriginal = hook.balanceOf(
+            address(this),
+            poolIdUnit
+        );
+
+        //set user address in hook data
+        bytes memory hookData = abi.encode(address(this));
+
+        //Now we swap
+        // we will swap 0.001 ether for tokens
+        // we should get 20% of 0.001 * 10**18 points
+        // = 2 * 10**14
+
+        swapRouter.swap{value: 0.001 ether}(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: true,
+                amountSpecified: -0.001 ether,
+                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            }),
+            PoolSwapTest.TestSettings({
+                takeClaims: false,
+                settleUsingBurn: false
+            }),
+            hookData
+        );
+        uint256 pointsBalanceAfterSwap = hook.balanceOf(
+            address(this),
+            poolIdUnit
+        );
+        assertEq(pointsBalanceAfterSwap - pointsBalanceOriginal, 2 * 10 ** 14);
     }
 }
