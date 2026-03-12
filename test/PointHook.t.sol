@@ -78,6 +78,7 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
             sqrtPriceAtTickUpper,
             ethToAdd
         );
+
         uint256 tokenToAdd = LiquidityAmounts.getAmount1ForLiquidity(
             sqrtPriceAtTickLower,
             SQRT_PRICE_1_1,
@@ -114,7 +115,7 @@ contract TestPointsHook is Test, Deployers, ERC1155TokenReceiver {
             key,
             IPoolManager.SwapParams({
                 zeroForOne: true,
-                amountSpecified: -0.001 ether,
+                amountSpecified: -int256(0.001 ether),
                 sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
             }),
             PoolSwapTest.TestSettings({
