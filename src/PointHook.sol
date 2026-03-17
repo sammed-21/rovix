@@ -54,7 +54,6 @@ contract PointsHook is BaseHook, ERC1155 {
     // 1. Make sure this is a ETH - TOken POol
     // 2. Make sure this swap is to buy Token in exchange for ETH
     // 3. Mint points equal to 20% of the amount of ETH being swapped in
-
     // this will help when you want to that stable coin should the one to swap in
     function _afterSwap(
         address sender,
