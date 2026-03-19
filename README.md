@@ -80,6 +80,27 @@ Covered scenarios:
 - `test_scenarios_1_to_5_USDC_depeg_in_order()`
 - `test_beforeSwap_Reverts_WhenCalledByNonPoolManager()`
 
+Analysing contracts...
+Running tests...
+
+Ran 3 tests for test/OscillonHook.t.sol:TestOscillonHook
+[PASS] test_beforeSwap_Reverts_WhenCalledByNonPoolManager() (gas: 19048)
+[PASS] test_scenarios_1_to_5_USDC_depeg_in_order() (gas: 607917)
+[PASS] test_scenarios_1_to_5_USDT_depeg_in_order() (gas: 600823)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 14.29ms (6.90ms CPU time)
+
+Ran 1 test suite in 132.08ms (14.29ms CPU time): 3 tests passed, 0 failed, 0 skipped (3 total tests)
+
+╭--------------------------------+----------------+----------------+----------------+---------------╮
+| File | % Lines | % Statements | % Branches | % Funcs |
++===================================================================================================+
+| src/OscillonHook.sol | 89.66% (52/58) | 90.00% (63/70) | 71.43% (15/21) | 83.33% (5/6) |
+|--------------------------------+----------------+----------------+----------------+---------------|
+| test/mock/MockV3Aggregator.sol | 84.62% (11/13) | 87.50% (7/8) | 100.00% (0/0) | 80.00% (4/5) |
+|--------------------------------+----------------+----------------+----------------+---------------|
+| Total | 88.73% (63/71) | 89.74% (70/78) | 71.43% (15/21) | 81.82% (9/11) |
+╰--------------------------------+----------------+----------------+----------------+---------------╯
+
 Run tests:
 
 ```bash
