@@ -25,6 +25,7 @@ import {MockV3Aggregator} from "./mock/MockV3Aggregator.sol";
 import {ERC1155TokenReceiver} from "solmate/src/tokens/ERC1155.sol";
 
 import {OscillonHook} from "../src/OscillonHook.sol";
+
 contract TestOscillonHook is Test, Deployers {
     MockERC20 token; // our token to use in the ETH-TOKEN pool
 
@@ -97,38 +98,26 @@ contract TestOscillonHook is Test, Deployers {
         );
     }
 
-    // function test_swap() public {
-    //     uint256 poolIdUnit = uint256(PoolId.unwrap(key.toId()));
-    //     uint256 pointsBalanceOriginal = hook.balanceOf(
-    //         address(this),
-    //         poolIdUnit
-    //     );
+    function test_beforeSwap_BaseFee_WhenNearPeg() public {
+        // set oracle near peg
+        oracle.updateAnswer(int256(1e18));
 
-    //     //set user address in hook data
-    //     bytes memory hookData = abi.encode(address(this));
+        bytes memory hookData = "";
+        vm.expectEmit(true, true, true, true, address(hook));
+        // optional: DepegDetected expected values if deterministic
 
-    //     //Now we swap
-    //     // we will swap 0.001 ether for tokens
-    //     // we should get 20% of 0.001 * 10**18 points
-    //     // = 2 * 10**14
-
-    //     swapRouter.swap{value: 0.001 ether}(
-    //         key,
-    //         IPoolManager.SwapParams({
-    //             zeroForOne: true,
-    //             amountSpecified: -int256(0.001 ether),
-    //             sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
-    //         }),
-    //         PoolSwapTest.TestSettings({
-    //             takeClaims: false,
-    //             settleUsingBurn: false
-    //         }),
-    //         hookData
-    //     );
-    //     uint256 pointsBalanceAfterSwap = hook.balanceOf(
-    //         address(this),
-    //         poolIdUnit
-    //     );
-    //     assertEq(pointsBalanceAfterSwap - pointsBalanceOriginal, 2 * 10 ** 14);
-    // }
+        swapRouter.swap{value: 0.001 ether}(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: true,
+                amountSpecified: -int256(0.001 ether),
+                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            }),
+            PoolSwapTest.TestSettings({
+                takeClaims: false,
+                settleUsingBurn: false
+            }),
+            hookData
+        );
+    }
 }
