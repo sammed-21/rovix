@@ -9,7 +9,6 @@ import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 
 import {PoolManager} from "v4-core/PoolManager.sol";
-import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 
@@ -27,97 +26,214 @@ import {ERC1155TokenReceiver} from "solmate/src/tokens/ERC1155.sol";
 import {OscillonHook} from "../src/OscillonHook.sol";
 
 contract TestOscillonHook is Test, Deployers {
-    MockERC20 token; // our token to use in the ETH-TOKEN pool
+    // two configured stables for the hook (e.g. USDC/USDT)
+    MockERC20 stable0;
+    MockERC20 stable1;
+    Currency stable0Currency;
+    Currency stable1Currency;
 
-    // Native tokens are represented by address(0)
-    Currency ethCurrency = Currency.wrap(address(0));
-    Currency tokenCurrency;
-
+    MockV3Aggregator oracle0;
+    MockV3Aggregator oracle1;
     OscillonHook hook;
 
+    // Match OscillonHook's event signature so `vm.expectEmit` can validate it.
+    event DepegDetected(uint256 depegBps, uint24 fee, uint256 swapSize);
+
+    uint256 constant AMOUNT_IN = 1e15;
+
+    // Fee schedule in OscillonHook.sol (100 pips ~= 1 bps, etc.)
+    uint24 constant BASE_FEE_PIPS = 100;
+    uint24 constant SMALL_FEE_PIPS = 800;
+    uint24 constant DRAIN_FEE_PIPS = 2800;
+    uint24 constant RESTORE_FEE_PIPS = 30;
+
     function setUp() public {
-        // step 1 +2
-        //deploy poolmanager and router contracts
         deployFreshManagerAndRouters();
-        MockV3Aggregator oracle = new MockV3Aggregator(18, int256(1e18));
 
-        // Deploy TOKENS contract
-        token = new MockERC20("USD Coin", "USDC", 18);
-        tokenCurrency = Currency.wrap(address(token));
+        // Deploy stable tokens (mocked as 18 decimals for tests).
+        stable0 = new MockERC20("USD Coin", "USDC", 18);
+        stable1 = new MockERC20("Tether", "USDT", 18);
+        stable0Currency = Currency.wrap(address(stable0));
+        stable1Currency = Currency.wrap(address(stable1));
 
-        //mint a tokens to overselve and address(1)
-        token.mint(address(this), type(uint128).max);
-        token.mint(address(1), type(uint128).max);
+        stable0.mint(address(this), type(uint128).max);
+        stable1.mint(address(this), type(uint128).max);
 
-        // Deploy hook to a address that has proper flags set
+        // Mint approvals for routers (spender is the router contracts).
+        stable0.approve(address(swapRouter), type(uint128).max);
+        stable1.approve(address(swapRouter), type(uint128).max);
+        stable0.approve(address(modifyLiquidityRouter), type(uint128).max);
+        stable1.approve(address(modifyLiquidityRouter), type(uint128).max);
+
+        // Deploy two oracles (1e18 = $1).
+        oracle0 = new MockV3Aggregator(18, int256(1e18));
+        oracle1 = new MockV3Aggregator(18, int256(1e18));
+
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG);
-        bytes memory constructorArgs = abi.encode(manager, address(oracle));
-        deployCodeTo("OscillonHook", constructorArgs, address(flags));
 
+        // Pass: manager, oracle0, stable0, stableDecimals0, oracle1, stable1, stableDecimals1
+        bytes memory constructorArgs = abi.encode(
+            manager,
+            oracle0,
+            address(stable0),
+            uint8(18),
+            oracle1,
+            address(stable1),
+            uint8(18)
+        );
+        deployCodeTo("OscillonHook", constructorArgs, address(flags));
         hook = OscillonHook(payable(address(flags)));
 
-        //appove our token for spending on the swap router and modify liquidity router
-        //this varables are coming from the depltoers contract
+        // Pool must be stable/stable, and PoolManager requires currency0 < currency1.
+        Currency c0 = stable0Currency;
+        Currency c1 = stable1Currency;
+        if (Currency.unwrap(c0) > Currency.unwrap(c1)) {
+            (c0, c1) = (c1, c0);
+        }
 
-        token.approve(address(swapRouter), type(uint128).max);
-        token.approve(address(modifyLiquidityRouter), type(uint128).max);
+        (key, ) = initPool(c0, c1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
 
-        (key, ) = initPool(
-            ethCurrency,
-            tokenCurrency,
-            IHooks(address(hook)),
-            3000,
-            SQRT_PRICE_1_1
-        );
-
-        //add some liqudiity to the pool
-        uint160 sqrtPriceAtTickLower = TickMath.getSqrtPriceAtTick(-60);
-        uint160 sqrtPriceAtTickUpper = TickMath.getSqrtPriceAtTick(60);
-
-        uint256 ethToAdd = 0.003 ether;
-        uint128 liquidityDelta = LiquidityAmounts.getLiquidityForAmount0(
-            SQRT_PRICE_1_1,
-            sqrtPriceAtTickUpper,
-            ethToAdd
-        );
-
-        uint256 tokenToAdd = LiquidityAmounts.getAmount1ForLiquidity(
-            sqrtPriceAtTickLower,
-            SQRT_PRICE_1_1,
-            liquidityDelta
-        );
-        modifyLiquidityRouter.modifyLiquidity{value: ethToAdd}(
+        // Add liquidity using the default test parameters from Deployers.
+        modifyLiquidityRouter.modifyLiquidity(
             key,
-            IPoolManager.ModifyLiquidityParams({
-                tickLower: -60,
-                tickUpper: 60,
-                liquidityDelta: int256(uint256(liquidityDelta)),
-                salt: bytes32(0)
-            }),
+            LIQUIDITY_PARAMS,
             ZERO_BYTES
         );
     }
 
-    function test_beforeSwap_BaseFee_WhenNearPeg() public {
-        // set oracle near peg
-        oracle.updateAnswer(int256(1e18));
+    function _sellStable1IntoPool() internal {
+        bool stable1IsCurrency0 = Currency.unwrap(key.currency0) ==
+            Currency.unwrap(stable1Currency);
+        bool zeroForOne = stable1IsCurrency0; // input token is currency0
+        uint160 sqrtPriceLimitX96 = zeroForOne
+            ? (TickMath.MIN_SQRT_PRICE + 1)
+            : (TickMath.MAX_SQRT_PRICE - 1);
 
-        bytes memory hookData = "";
-        vm.expectEmit(true, true, true, true, address(hook));
-        // optional: DepegDetected expected values if deterministic
-
-        swapRouter.swap{value: 0.001 ether}(
+        swapRouter.swap(
             key,
             IPoolManager.SwapParams({
-                zeroForOne: true,
-                amountSpecified: -int256(0.001 ether),
-                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(AMOUNT_IN),
+                sqrtPriceLimitX96: sqrtPriceLimitX96
             }),
             PoolSwapTest.TestSettings({
                 takeClaims: false,
                 settleUsingBurn: false
             }),
-            hookData
+            ""
+        );
+    }
+
+    function _sellStable0IntoPool() internal {
+        bool stable0IsCurrency0 = Currency.unwrap(key.currency0) ==
+            Currency.unwrap(stable0Currency);
+        bool zeroForOne = stable0IsCurrency0; // input token is currency0
+        uint160 sqrtPriceLimitX96 = zeroForOne
+            ? (TickMath.MIN_SQRT_PRICE + 1)
+            : (TickMath.MAX_SQRT_PRICE - 1);
+
+        swapRouter.swap(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(AMOUNT_IN),
+                sqrtPriceLimitX96: sqrtPriceLimitX96
+            }),
+            PoolSwapTest.TestSettings({
+                takeClaims: false,
+                settleUsingBurn: false
+            }),
+            ""
+        );
+    }
+
+    function test_scenarios_1_to_5_USDT_depeg_in_order() public {
+        // Scenario 1 — healthy pool (depeg = 0 => base fee)
+        oracle0.updateAnswer(int256(1e18));
+        oracle1.updateAnswer(int256(1e18));
+
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit DepegDetected(0, BASE_FEE_PIPS, AMOUNT_IN);
+        _sellStable1IntoPool();
+
+        // Scenario 2 — small depeg: 7 bps => small fee
+        // oraclePrice = 1e18 * (1 - 7/10000) = 0.9993e18
+        oracle1.updateAnswer(999300000000000000);
+
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit DepegDetected(7, SMALL_FEE_PIPS, AMOUNT_IN);
+        _sellStable1IntoPool();
+
+        // Scenario 3 — drain tier: 20 bps => drain fee
+        // oraclePrice = 1e18 * (1 - 20/10000) = 0.998e18
+        oracle1.updateAnswer(998000000000000000);
+
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit DepegDetected(20, DRAIN_FEE_PIPS, AMOUNT_IN);
+        _sellStable1IntoPool();
+
+        // Scenario 4 — restore: back to peg => restore fee within restore window
+        vm.warp(block.timestamp + 30 minutes);
+        oracle1.updateAnswer(int256(1e18));
+
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit DepegDetected(0, RESTORE_FEE_PIPS, AMOUNT_IN);
+        _sellStable1IntoPool();
+
+        // Scenario 5 — severe depeg: 60 bps => circuit breaker freeze (revert)
+        oracle1.updateAnswer(994000000000000000); // 0.994e18
+
+        vm.expectRevert();
+        _sellStable1IntoPool();
+    }
+
+    function test_scenarios_1_to_5_USDC_depeg_in_order() public {
+        // Scenario 1 — healthy pool (base fee)
+        oracle0.updateAnswer(int256(1e18));
+        oracle1.updateAnswer(int256(1e18));
+
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit DepegDetected(0, BASE_FEE_PIPS, AMOUNT_IN);
+        _sellStable0IntoPool();
+
+        // Scenario 2 — small depeg for stable0 (7 bps => small fee)
+        oracle0.updateAnswer(999300000000000000);
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit DepegDetected(7, SMALL_FEE_PIPS, AMOUNT_IN);
+        _sellStable0IntoPool();
+
+        // Scenario 3 — drain tier for stable0 (20 bps => drain fee)
+        oracle0.updateAnswer(998000000000000000);
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit DepegDetected(20, DRAIN_FEE_PIPS, AMOUNT_IN);
+        _sellStable0IntoPool();
+
+        // Scenario 4 — restore for stable0 => restore fee
+        vm.warp(block.timestamp + 30 minutes);
+        oracle0.updateAnswer(int256(1e18));
+        vm.expectEmit(true, true, true, true, address(hook));
+        emit DepegDetected(0, RESTORE_FEE_PIPS, AMOUNT_IN);
+        _sellStable0IntoPool();
+
+        // Scenario 5 — severe depeg (60 bps) => circuit breaker freeze (revert)
+        oracle0.updateAnswer(994000000000000000);
+        vm.expectRevert();
+        _sellStable0IntoPool();
+    }
+
+    function test_beforeSwap_Reverts_WhenCalledByNonPoolManager() public {
+        bool zeroForOne = true;
+        uint160 sqrtPriceLimitX96 = TickMath.MIN_SQRT_PRICE + 1;
+        vm.expectRevert();
+        IHooks(address(hook)).beforeSwap(
+            address(this),
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(AMOUNT_IN),
+                sqrtPriceLimitX96: sqrtPriceLimitX96
+            }),
+            ""
         );
     }
 }

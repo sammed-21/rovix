@@ -7,6 +7,7 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {
     BeforeSwapDelta,
     BeforeSwapDeltaLibrary
@@ -26,27 +27,69 @@ interface IChainlinkOracle {
         external
         view
         returns (uint80, int256, uint256, uint256, uint80);
+
+    function decimals() external view returns (uint8);
 }
 
 contract OscillonHook is BaseHook {
-    using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
-    /// @notice Chainlink USDC/USD oracle
-    IChainlinkOracle public immutable USDC_ORACLE;
-
-    /// @notice Peg threshold basis points (50 = 0.5%)
-    uint256 public constant PEG_THRESHOLD_BPS = 50;
-
-    /// @notice Max swap size during depeg (in token decimals)
-    uint256 public constant MAX_DEPEG_SWAP = 10_000 * 1e18;
 
     event DepegDetected(uint256 depegBps, uint24 fee, uint256 swapSize);
 
+    error UnsupportedStablePool();
+    error PoolFrozen();
+
+    /// @notice Oracle and stable token configuration for stable token 0
+    IChainlinkOracle public immutable ORACLE0;
+    address public immutable STABLE0;
+    uint8 public immutable ORACLE0_DECIMALS;
+    uint256 public immutable MAX_DEPEG_SWAP0;
+
+    /// @notice Oracle and stable token configuration for stable token 1
+    IChainlinkOracle public immutable ORACLE1;
+    address public immutable STABLE1;
+    uint8 public immutable ORACLE1_DECIMALS;
+    uint256 public immutable MAX_DEPEG_SWAP1;
+
+    // Fee schedule (returned via lpFeeOverride) is in "hundredths of a bip"
+    uint24 public constant BASE_FEE_PIPS = 100; // ~1 bps
+    uint24 public constant SMALL_FEE_PIPS = 800; // ~8 bps
+    uint24 public constant DRAIN_FEE_PIPS = 2800; // ~28 bps
+    uint24 public constant RESTORE_FEE_PIPS = 30; // ~0.3 bps
+
+    uint256 public constant SMALL_DEPEG_BPS = 7; // small depeg threshold
+    uint256 public constant DRAIN_DEPEG_BPS = 20; // drain/deep depeg threshold
+    uint256 public constant FREEZE_DEPEG_BPS = 60; // circuit breaker threshold
+    uint256 public constant RESTORE_WINDOW = 1 hours;
+
+    uint256 public constant MAX_DEPEG_SWAP_FACTOR = 10_000; // exact-in cap factor
+
+    mapping(PoolId => uint256) public lastHighDepegAt;
+
     constructor(
         IPoolManager _poolManager,
-        IChainlinkOracle _oracle
+        IChainlinkOracle _oracle0,
+        address _stable0,
+        uint8 stableDecimals0,
+        IChainlinkOracle _oracle1,
+        address _stable1,
+        uint8 stableDecimals1
     ) BaseHook(_poolManager) {
-        USDC_ORACLE = _oracle;
+        ORACLE0 = _oracle0;
+        STABLE0 = _stable0;
+        ORACLE0_DECIMALS = _oracle0.decimals();
+        MAX_DEPEG_SWAP0 =
+            MAX_DEPEG_SWAP_FACTOR *
+            (10 ** uint256(stableDecimals0));
+
+        ORACLE1 = _oracle1;
+        STABLE1 = _stable1;
+        ORACLE1_DECIMALS = _oracle1.decimals();
+        MAX_DEPEG_SWAP1 =
+            MAX_DEPEG_SWAP_FACTOR *
+            (10 ** uint256(stableDecimals1));
+
+        require(_stable0 != _stable1, "STABLES_EQUAL");
     }
 
     /// @notice OscillonHook stablecoin permissions
@@ -61,8 +104,8 @@ contract OscillonHook is BaseHook {
                 beforeInitialize: false,
                 afterInitialize: false,
                 beforeAddLiquidity: false,
-                beforeRemoveLiquidity: false,
                 afterAddLiquidity: false,
+                beforeRemoveLiquidity: false,
                 afterRemoveLiquidity: false,
                 beforeSwap: true,
                 afterSwap: false,
@@ -75,20 +118,128 @@ contract OscillonHook is BaseHook {
             });
     }
 
-    /// @notice OscillonHook core: Dynamic fees on depeg
+    function _readDepeg(
+        IChainlinkOracle oracle,
+        uint8 oracleDecimals
+    ) internal view returns (uint256 depegBps, bool pegBelow) {
+        (, int256 oraclePrice, , uint256 updatedAt, ) = oracle
+            .latestRoundData();
+        require(oraclePrice > 0, "Bad oracle");
+        require(block.timestamp <= updatedAt + 1 hours, "Stale oracle");
+
+        // Normalize oracle price into 1e18 (peg is 1e18).
+        uint256 pegPrice1e18 = (uint256(oraclePrice) * 1e18) /
+            (10 ** uint256(oracleDecimals));
+        pegBelow = pegPrice1e18 < 1e18;
+
+        if (pegBelow) {
+            depegBps = ((1e18 - pegPrice1e18) * 10_000) / 1e18;
+        } else {
+            depegBps = ((pegPrice1e18 - 1e18) * 10_000) / 1e18;
+        }
+    }
+
+    function _stableIndexInPool(
+        address token
+    ) internal view returns (uint8 idx) {
+        if (token == STABLE0) return 0;
+        if (token == STABLE1) return 1;
+        revert UnsupportedStablePool();
+    }
+
+    function _selectFeeAndUpdate(
+        PoolKey calldata key,
+        uint256 depegBps,
+        bool pegBelow,
+        int256 amountSpecified,
+        uint256 swapSize,
+        bool tokenInIsStable0
+    ) internal returns (uint24 fee) {
+        PoolId poolId = key.toId();
+
+        uint256 lastHigh = lastHighDepegAt[poolId];
+        bool inRestoreWindow = lastHigh != 0 &&
+            (block.timestamp - lastHigh) <= RESTORE_WINDOW;
+
+        uint256 maxSwap = tokenInIsStable0 ? MAX_DEPEG_SWAP0 : MAX_DEPEG_SWAP1;
+
+        fee = BASE_FEE_PIPS;
+
+        // Circuit breaker: freeze only for severe depeg when selling the depegged stable into the pool.
+        if (pegBelow && depegBps >= FREEZE_DEPEG_BPS) revert PoolFrozen();
+
+        if (pegBelow) {
+            // Update last depeg time when we're in the "drain" tier.
+            if (depegBps >= DRAIN_DEPEG_BPS) {
+                lastHighDepegAt[poolId] = block.timestamp;
+                fee = DRAIN_FEE_PIPS;
+
+                // Optional exact-in cap during deep depeg.
+                if (amountSpecified < 0) {
+                    require(swapSize <= maxSwap, "Depeg swap limit");
+                }
+            } else if (depegBps >= SMALL_DEPEG_BPS) {
+                fee = SMALL_FEE_PIPS;
+            }
+        }
+
+        // Restore fee shortly after a high depeg ended.
+        if (inRestoreWindow && depegBps <= SMALL_DEPEG_BPS) {
+            fee = RESTORE_FEE_PIPS;
+        }
+    }
+
+    /// @notice OscillonHook core: inventory-risk layer for a stable/stable pool.
+    /// In severe depeg, swaps selling the depegged stable into the pool are frozen.
     function _beforeSwap(
         address,
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata
     ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        (
-            uint256 twapDepegBps,
-            uint24 fee,
-            uint256 swapSize
-        ) = _computeDepegAndFee(key, params);
+        // Enforce "stable-only" pools (e.g. USDC/USDT, USDC/DAI) by requiring both legs are configured stables.
+        if (
+            Currency.unwrap(key.currency0) != STABLE0 &&
+            Currency.unwrap(key.currency0) != STABLE1
+        ) {
+            revert UnsupportedStablePool();
+        }
+        if (
+            Currency.unwrap(key.currency1) != STABLE0 &&
+            Currency.unwrap(key.currency1) != STABLE1
+        ) {
+            revert UnsupportedStablePool();
+        }
 
-        emit DepegDetected(twapDepegBps, fee, swapSize);
+        // Determine which stable is being sold into the pool.
+        address tokenIn = params.zeroForOne
+            ? Currency.unwrap(key.currency0)
+            : Currency.unwrap(key.currency1);
+
+        // Read depeg for the *input* stable only (directional asymmetry).
+        uint256 depegBps;
+        bool pegBelow;
+        if (tokenIn == STABLE0) {
+            (depegBps, pegBelow) = _readDepeg(ORACLE0, ORACLE0_DECIMALS);
+        } else {
+            (depegBps, pegBelow) = _readDepeg(ORACLE1, ORACLE1_DECIMALS);
+        }
+
+        // Calculate exact-in size magnitude (used for caps + event).
+        uint256 swapSize = params.amountSpecified < 0
+            ? uint256(-params.amountSpecified)
+            : uint256(params.amountSpecified);
+
+        uint24 fee = _selectFeeAndUpdate(
+            key,
+            depegBps,
+            pegBelow,
+            params.amountSpecified,
+            swapSize,
+            tokenIn == STABLE0
+        );
+
+        emit DepegDetected(depegBps, fee, swapSize);
 
         return (
             this.beforeSwap.selector,
@@ -96,62 +247,4 @@ contract OscillonHook is BaseHook {
             fee
         );
     }
-
-    function _computeDepegAndFee(
-        PoolKey calldata key,
-        SwapParams calldata params
-    )
-        internal
-        view
-        returns (uint256 twapDepegBps, uint24 fee, uint256 swapSize)
-    {
-        // 1. slot0
-        (uint160 sqrtPriceX96, , , ) = poolManager.getSlot0(key.toId());
-
-        // 2. pool price
-        uint256 poolPrice = (uint256(sqrtPriceX96) * sqrtPriceX96) >> 192;
-
-        // 3. oracle price
-        (, int256 oraclePrice, , uint256 updatedAt, ) = USDC_ORACLE
-            .latestRoundData();
-        require(block.timestamp <= updatedAt + 1 hours, "Stale oracle");
-
-        uint256 pegPrice = uint256(oraclePrice);
-        uint256 depegBps = poolPrice > pegPrice
-            ? ((poolPrice - pegPrice) * 1e18) / pegPrice / 100
-            : ((pegPrice - poolPrice) * 1e18) / pegPrice / 100;
-
-        // 4. use current price as TWAP proxy
-        twapDepegBps = depegBps;
-
-        // 5. fee & limit
-        fee = 300;
-        if (twapDepegBps > PEG_THRESHOLD_BPS) {
-            fee = 10_000;
-
-            int256 amt = params.amountSpecified;
-            if (amt < 0) {
-                uint256 absAmount = uint256(-amt);
-                require(absAmount <= MAX_DEPEG_SWAP, "Depeg swap limit");
-            }
-        } else if (twapDepegBps > 20) {
-            fee = 5_000;
-        }
-
-        swapSize = params.amountSpecified < 0
-            ? uint256(-params.amountSpecified)
-            : uint256(params.amountSpecified);
-        return (twapDepegBps, fee, swapSize);
-    }
-
-    /// @notice Post-swap logging
-    // function afterSwap(
-    //     address,
-    //     PoolKey calldata key,
-    //     SwapParams calldata,
-    //     BeforeSwapDelta,
-    //     uint256
-    // ) external override onlyPoolManager returns (bytes4) {
-    //     return OscillonHook.afterSwap.selector;
-    // }
 }
