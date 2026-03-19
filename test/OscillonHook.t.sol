@@ -72,15 +72,8 @@ contract TestOscillonHook is Test, Deployers {
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG);
 
         // Pass: manager, oracle0, stable0, stableDecimals0, oracle1, stable1, stableDecimals1
-        bytes memory constructorArgs = abi.encode(
-            manager,
-            oracle0,
-            address(stable0),
-            uint8(18),
-            oracle1,
-            address(stable1),
-            uint8(18)
-        );
+        bytes memory constructorArgs =
+            abi.encode(manager, oracle0, address(stable0), uint8(18), oracle1, address(stable1), uint8(18));
         deployCodeTo("OscillonHook", constructorArgs, address(flags));
         hook = OscillonHook(payable(address(flags)));
 
@@ -91,23 +84,16 @@ contract TestOscillonHook is Test, Deployers {
             (c0, c1) = (c1, c0);
         }
 
-        (key, ) = initPool(c0, c1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
+        (key,) = initPool(c0, c1, IHooks(address(hook)), 3000, SQRT_PRICE_1_1);
 
         // Add liquidity using the default test parameters from Deployers.
-        modifyLiquidityRouter.modifyLiquidity(
-            key,
-            LIQUIDITY_PARAMS,
-            ZERO_BYTES
-        );
+        modifyLiquidityRouter.modifyLiquidity(key, LIQUIDITY_PARAMS, ZERO_BYTES);
     }
 
     function _sellStable1IntoPool() internal {
-        bool stable1IsCurrency0 = Currency.unwrap(key.currency0) ==
-            Currency.unwrap(stable1Currency);
+        bool stable1IsCurrency0 = Currency.unwrap(key.currency0) == Currency.unwrap(stable1Currency);
         bool zeroForOne = stable1IsCurrency0; // input token is currency0
-        uint160 sqrtPriceLimitX96 = zeroForOne
-            ? (TickMath.MIN_SQRT_PRICE + 1)
-            : (TickMath.MAX_SQRT_PRICE - 1);
+        uint160 sqrtPriceLimitX96 = zeroForOne ? (TickMath.MIN_SQRT_PRICE + 1) : (TickMath.MAX_SQRT_PRICE - 1);
 
         swapRouter.swap(
             key,
@@ -116,21 +102,15 @@ contract TestOscillonHook is Test, Deployers {
                 amountSpecified: -int256(AMOUNT_IN),
                 sqrtPriceLimitX96: sqrtPriceLimitX96
             }),
-            PoolSwapTest.TestSettings({
-                takeClaims: false,
-                settleUsingBurn: false
-            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
             ""
         );
     }
 
     function _sellStable0IntoPool() internal {
-        bool stable0IsCurrency0 = Currency.unwrap(key.currency0) ==
-            Currency.unwrap(stable0Currency);
+        bool stable0IsCurrency0 = Currency.unwrap(key.currency0) == Currency.unwrap(stable0Currency);
         bool zeroForOne = stable0IsCurrency0; // input token is currency0
-        uint160 sqrtPriceLimitX96 = zeroForOne
-            ? (TickMath.MIN_SQRT_PRICE + 1)
-            : (TickMath.MAX_SQRT_PRICE - 1);
+        uint160 sqrtPriceLimitX96 = zeroForOne ? (TickMath.MIN_SQRT_PRICE + 1) : (TickMath.MAX_SQRT_PRICE - 1);
 
         swapRouter.swap(
             key,
@@ -139,10 +119,7 @@ contract TestOscillonHook is Test, Deployers {
                 amountSpecified: -int256(AMOUNT_IN),
                 sqrtPriceLimitX96: sqrtPriceLimitX96
             }),
-            PoolSwapTest.TestSettings({
-                takeClaims: false,
-                settleUsingBurn: false
-            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
             ""
         );
     }

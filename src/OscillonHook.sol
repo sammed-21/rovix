@@ -8,14 +8,8 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {
-    BeforeSwapDelta,
-    BeforeSwapDeltaLibrary
-} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
-import {
-    SwapParams,
-    ModifyLiquidityParams
-} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 // import {
 //     OracleLibrary
 // } from "v4-hooks-public/lib/briefcase/src/protocols/v3-periphery/libraries/OracleLibrary.sol";
@@ -23,10 +17,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {console} from "forge-std/console.sol";
 
 interface IChainlinkOracle {
-    function latestRoundData()
-        external
-        view
-        returns (uint80, int256, uint256, uint256, uint80);
+    function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80);
 
     function decimals() external view returns (uint8);
 }
@@ -78,58 +69,47 @@ contract OscillonHook is BaseHook {
         ORACLE0 = _oracle0;
         STABLE0 = _stable0;
         ORACLE0_DECIMALS = _oracle0.decimals();
-        MAX_DEPEG_SWAP0 =
-            MAX_DEPEG_SWAP_FACTOR *
-            (10 ** uint256(stableDecimals0));
+        MAX_DEPEG_SWAP0 = MAX_DEPEG_SWAP_FACTOR * (10 ** uint256(stableDecimals0));
 
         ORACLE1 = _oracle1;
         STABLE1 = _stable1;
         ORACLE1_DECIMALS = _oracle1.decimals();
-        MAX_DEPEG_SWAP1 =
-            MAX_DEPEG_SWAP_FACTOR *
-            (10 ** uint256(stableDecimals1));
+        MAX_DEPEG_SWAP1 = MAX_DEPEG_SWAP_FACTOR * (10 ** uint256(stableDecimals1));
 
         require(_stable0 != _stable1, "STABLES_EQUAL");
     }
 
     /// @notice OscillonHook stablecoin permissions
-    function getHookPermissions()
-        public
-        pure
-        override
-        returns (Hooks.Permissions memory)
-    {
-        return
-            Hooks.Permissions({
-                beforeInitialize: false,
-                afterInitialize: false,
-                beforeAddLiquidity: false,
-                afterAddLiquidity: false,
-                beforeRemoveLiquidity: false,
-                afterRemoveLiquidity: false,
-                beforeSwap: true,
-                afterSwap: false,
-                beforeDonate: false,
-                afterDonate: false,
-                beforeSwapReturnDelta: false,
-                afterSwapReturnDelta: false,
-                afterAddLiquidityReturnDelta: false,
-                afterRemoveLiquidityReturnDelta: false
-            });
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        return Hooks.Permissions({
+            beforeInitialize: false,
+            afterInitialize: false,
+            beforeAddLiquidity: false,
+            afterAddLiquidity: false,
+            beforeRemoveLiquidity: false,
+            afterRemoveLiquidity: false,
+            beforeSwap: true,
+            afterSwap: false,
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: false,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
     }
 
-    function _readDepeg(
-        IChainlinkOracle oracle,
-        uint8 oracleDecimals
-    ) internal view returns (uint256 depegBps, bool pegBelow) {
-        (, int256 oraclePrice, , uint256 updatedAt, ) = oracle
-            .latestRoundData();
+    function _readDepeg(IChainlinkOracle oracle, uint8 oracleDecimals)
+        internal
+        view
+        returns (uint256 depegBps, bool pegBelow)
+    {
+        (, int256 oraclePrice,, uint256 updatedAt,) = oracle.latestRoundData();
         require(oraclePrice > 0, "Bad oracle");
         require(block.timestamp <= updatedAt + 1 hours, "Stale oracle");
 
         // Normalize oracle price into 1e18 (peg is 1e18).
-        uint256 pegPrice1e18 = (uint256(oraclePrice) * 1e18) /
-            (10 ** uint256(oracleDecimals));
+        uint256 pegPrice1e18 = (uint256(oraclePrice) * 1e18) / (10 ** uint256(oracleDecimals));
         pegBelow = pegPrice1e18 < 1e18;
 
         if (pegBelow) {
@@ -139,9 +119,7 @@ contract OscillonHook is BaseHook {
         }
     }
 
-    function _stableIndexInPool(
-        address token
-    ) internal view returns (uint8 idx) {
+    function _stableIndexInPool(address token) internal view returns (uint8 idx) {
         if (token == STABLE0) return 0;
         if (token == STABLE1) return 1;
         revert UnsupportedStablePool();
@@ -158,8 +136,7 @@ contract OscillonHook is BaseHook {
         PoolId poolId = key.toId();
 
         uint256 lastHigh = lastHighDepegAt[poolId];
-        bool inRestoreWindow = lastHigh != 0 &&
-            (block.timestamp - lastHigh) <= RESTORE_WINDOW;
+        bool inRestoreWindow = lastHigh != 0 && (block.timestamp - lastHigh) <= RESTORE_WINDOW;
 
         uint256 maxSwap = tokenInIsStable0 ? MAX_DEPEG_SWAP0 : MAX_DEPEG_SWAP1;
 
@@ -191,30 +168,21 @@ contract OscillonHook is BaseHook {
 
     /// @notice OscillonHook core: inventory-risk layer for a stable/stable pool.
     /// In severe depeg, swaps selling the depegged stable into the pool are frozen.
-    function _beforeSwap(
-        address,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        bytes calldata
-    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
+    function _beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
         // Enforce "stable-only" pools (e.g. USDC/USDT, USDC/DAI) by requiring both legs are configured stables.
-        if (
-            Currency.unwrap(key.currency0) != STABLE0 &&
-            Currency.unwrap(key.currency0) != STABLE1
-        ) {
+        if (Currency.unwrap(key.currency0) != STABLE0 && Currency.unwrap(key.currency0) != STABLE1) {
             revert UnsupportedStablePool();
         }
-        if (
-            Currency.unwrap(key.currency1) != STABLE0 &&
-            Currency.unwrap(key.currency1) != STABLE1
-        ) {
+        if (Currency.unwrap(key.currency1) != STABLE0 && Currency.unwrap(key.currency1) != STABLE1) {
             revert UnsupportedStablePool();
         }
 
         // Determine which stable is being sold into the pool.
-        address tokenIn = params.zeroForOne
-            ? Currency.unwrap(key.currency0)
-            : Currency.unwrap(key.currency1);
+        address tokenIn = params.zeroForOne ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1);
 
         // Read depeg for the *input* stable only (directional asymmetry).
         uint256 depegBps;
@@ -226,25 +194,13 @@ contract OscillonHook is BaseHook {
         }
 
         // Calculate exact-in size magnitude (used for caps + event).
-        uint256 swapSize = params.amountSpecified < 0
-            ? uint256(-params.amountSpecified)
-            : uint256(params.amountSpecified);
+        uint256 swapSize =
+            params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
 
-        uint24 fee = _selectFeeAndUpdate(
-            key,
-            depegBps,
-            pegBelow,
-            params.amountSpecified,
-            swapSize,
-            tokenIn == STABLE0
-        );
+        uint24 fee = _selectFeeAndUpdate(key, depegBps, pegBelow, params.amountSpecified, swapSize, tokenIn == STABLE0);
 
         emit DepegDetected(depegBps, fee, swapSize);
 
-        return (
-            this.beforeSwap.selector,
-            BeforeSwapDeltaLibrary.ZERO_DELTA,
-            fee
-        );
+        return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, fee);
     }
 }
