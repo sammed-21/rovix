@@ -4,49 +4,24 @@ Inventory-risk protection hook for Uniswap v4 stable pools.
 
 ## Overview
 
-`OscillonHook` is a `beforeSwap` hook that protects LPs during stablecoin depeg events.  
-It monitors token-specific oracle prices, detects depeg severity, and applies directional controls:
+`OscillonHook` is a `beforeSwap` hook that protects LP inventory during stablecoin depeg events.
+It monitors token-specific oracle prices, computes off-peg severity, and applies defensive fee/circuit-breaker policy.
 
-- fee escalation under stress
-- deep-depeg exact-in size caps
-- severe-depeg circuit breaker (`PoolFrozen`)
+Designed for stable/stable pools such as USDC/USDT and USDC/DAI.
 
-This project is designed for stable/stable pools such as USDC/USDT or USDC/DAI.
-
-## Problem
-
-When one stablecoin depegs, traders can dump the weaker token into a pool and push inventory risk onto LPs.
-Without dynamic controls, LPs absorb losses while arbitrage captures most upside.
-
-OscillonHook adds policy logic to reduce that risk while keeping normal operation lightweight.
-
-## How the Hook Works
+## What It Does
 
 Implementation: `src/OscillonHook.sol`
 
-1. **Stable-only guard**
-   - Pool tokens must match configured `STABLE0` and `STABLE1`.
-   - Otherwise swap reverts with `UnsupportedStablePool()`.
+1. Validates pool is composed of configured stables (`STABLE0`, `STABLE1`).
+2. Reads the oracle for the input stable token.
+3. Computes absolute depeg in basis points from $1.
+4. Applies dynamic fee policy with deep-depeg protections.
+5. Emits `DepegDetected(depegBps, fee, swapSize)`.
 
-2. **Token-specific oracle read**
-   - Reads the oracle of the input stable token for the current swap direction.
-   - Reverts on invalid/stale oracle data:
-     - `Bad oracle`
-     - `Stale oracle`
+## Policy
 
-3. **Depeg detection**
-   - Computes absolute deviation from $1 in basis points (`depegBps`).
-
-4. **Policy**
-   - Small depeg -> increased fee
-   - Drain tier -> higher fee + exact-in cap
-   - Severe depeg -> `PoolFrozen()` for dumping flow
-   - Recovery window -> temporary restore fee after high-risk events
-
-5. **Event**
-   - Emits `DepegDetected(depegBps, fee, swapSize)` on each swap path.
-
-## Current Policy Constants
+Constants:
 
 - `SMALL_DEPEG_BPS = 7`
 - `DRAIN_DEPEG_BPS = 20`
@@ -60,60 +35,67 @@ Fee tiers (LP fee override pips):
 - Drain tier: `2800` (~28 bps)
 - Restore tier: `30` (~0.3 bps)
 
-## Security Notes
+Notes:
 
-- Hook entrypoints are protected by `onlyPoolManager` through `BaseHook`.
-- Non-pool-manager direct calls are expected to revert.
-- Liquidity operations are not blocked by this hook policy:
-  - `beforeAddLiquidity = false`
-  - `beforeRemoveLiquidity = false`
-  - `afterAddLiquidity = false`
-  - `afterRemoveLiquidity = false`
+- Severe depeg (`>= FREEZE_DEPEG_BPS`) freezes the path with `PoolFrozen()`.
+- Deep-depeg swap-size cap now applies to both exact-in and exact-out requests.
+- `RESTORE_FEE_PIPS` is intentionally lower than base to incentivize post-stress rebalancing flow.
 
-## Tests
+## Security
 
-Test file: `test/OscillonHook.t.sol`
+- Hook entrypoints are restricted by `onlyPoolManager` (via `BaseHook`).
+- Direct non-manager calls revert.
+- Oracle sanity checks include:
+  - positive price
+  - not future timestamp
+  - fresh data within 1 hour
 
-Covered scenarios:
+Liquidity operations remain available:
 
-- `test_scenarios_1_to_5_USDT_depeg_in_order()`
-- `test_scenarios_1_to_5_USDC_depeg_in_order()`
-- `test_beforeSwap_Reverts_WhenCalledByNonPoolManager()`
+- `beforeAddLiquidity = false`
+- `beforeRemoveLiquidity = false`
+- `afterAddLiquidity = false`
+- `afterRemoveLiquidity = false`
 
-Analysing contracts...
-Running tests...
+## Testing
 
-Ran 3 tests for test/OscillonHook.t.sol:TestOscillonHook
-[PASS] test_beforeSwap_Reverts_WhenCalledByNonPoolManager() (gas: 19048)
-[PASS] test_scenarios_1_to_5_USDC_depeg_in_order() (gas: 607917)
-[PASS] test_scenarios_1_to_5_USDT_depeg_in_order() (gas: 600823)
-Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 14.29ms (6.90ms CPU time)
+Tests: `test/OscillonHook.t.sol`
 
-Ran 1 test suite in 132.08ms (14.29ms CPU time): 3 tests passed, 0 failed, 0 skipped (3 total tests)
+- `test_beforeSwap_AppliesPolicyLadder_WhenUSDTDepegs()`
+- `test_beforeSwap_AppliesPolicyLadder_WhenUSDCDepegs()`
+- `test_beforeSwap_Reverts_WhenCallerIsNotPoolManager()`
+- `test_beforeSwap_Reverts_WhenInputStableIsAbovePegByFreezeThreshold()`
+- `test_beforeSwap_Reverts_WhenExactOutputExceedsDeepDepegCap()`
 
-╭--------------------------------+----------------+----------------+----------------+---------------╮
-| File | % Lines | % Statements | % Branches | % Funcs |
-+===================================================================================================+
-| src/OscillonHook.sol | 89.66% (52/58) | 90.00% (63/70) | 71.43% (15/21) | 83.33% (5/6) |
-|--------------------------------+----------------+----------------+----------------+---------------|
-| test/mock/MockV3Aggregator.sol | 84.62% (11/13) | 87.50% (7/8) | 100.00% (0/0) | 80.00% (4/5) |
-|--------------------------------+----------------+----------------+----------------+---------------|
-| Total | 88.73% (63/71) | 89.74% (70/78) | 71.43% (15/21) | 81.82% (9/11) |
-╰--------------------------------+----------------+----------------+----------------+---------------╯
-
-Run tests:
+Run:
 
 ```bash
 forge test -vvv
 ```
 
-## Project Structure
+## Deployment Script
 
-- `src/OscillonHook.sol` - hook logic
-- `test/OscillonHook.t.sol` - scenario and security tests
-- `test/mock/MockV3Aggregator.sol` - oracle mock
+A CREATE2 + HookMiner deployment script is included:
 
-## Build and Tooling
+- `script/DeployOscillonHook.s.sol`
+
+Required env vars:
+
+- `POOL_MANAGER`
+- `ORACLE0`
+- `STABLE0`
+- `STABLE0_DECIMALS`
+- `ORACLE1`
+- `STABLE1`
+- `STABLE1_DECIMALS`
+
+Example:
+
+```bash
+forge script script/DeployOscillonHook.s.sol:DeployOscillonHookScript --broadcast --rpc-url <RPC_URL>
+```
+
+## Build Commands
 
 ```bash
 forge build
@@ -122,8 +104,8 @@ forge fmt
 forge snapshot
 ```
 
-## Limitations (MVP)
+## MVP Limitations
 
 - Static thresholds and fee tiers (not governance-tunable yet)
 - Single oracle feed per token (no fallback aggregation)
-- Parameter calibration should be validated with deeper economic simulation
+- Economic parameter calibration should be validated with deeper simulation
