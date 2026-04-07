@@ -53,7 +53,7 @@ contract OscillonHook is BaseHook {
     uint256 public constant DRAIN_DEPEG_BPS = 20; // drain/deep depeg threshold
     uint256 public constant FREEZE_DEPEG_BPS = 60; // circuit breaker threshold
     uint256 public constant RESTORE_WINDOW = 1 hours;
-
+j 
     uint256 public constant MAX_DEPEG_SWAP_FACTOR = 10_000; // exact-in cap factor
 
     mapping(PoolId => uint256) public lastHighDepegAt;
@@ -93,7 +93,7 @@ contract OscillonHook is BaseHook {
     {
         return
             Hooks.Permissions({
-                beforeInitialize: false,
+                beforeInitialize: true,
                 afterInitialize: false,
                 beforeAddLiquidity: false,
                 afterAddLiquidity: false,
@@ -124,7 +124,7 @@ contract OscillonHook is BaseHook {
         uint256 pegPrice1e18 = (uint256(oraclePrice) * 1e18) /
             (10 ** uint256(oracleDecimals));
         pegBelow = pegPrice1e18 < 1e18;
-
+    
         if (pegBelow) {
             depegBps = ((1e18 - pegPrice1e18) * 10_000) / 1e18;
         } else {
