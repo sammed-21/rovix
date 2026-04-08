@@ -17,8 +17,7 @@ import {OscillonHook, IChainlinkOracle} from "../src/OscillonHook.sol";
 /// - STABLE1
 /// - STABLE1_DECIMALS
 contract DeployOscillonHookScript is Script {
-    address constant CREATE2_DEPLOYER =
-        address(0x4e59b44847b379578588920cA78FbF26c0B4956C);
+    address constant CREATE2_DEPLOYER = address(0x4e59b44847b379578588920cA78FbF26c0B4956C);
 
     function run() external {
         IPoolManager manager = IPoolManager(vm.envAddress("POOL_MANAGER"));
@@ -30,22 +29,11 @@ contract DeployOscillonHookScript is Script {
         uint8 stable1Decimals = uint8(vm.envUint("STABLE1_DECIMALS"));
 
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG);
-        bytes memory constructorArgs = abi.encode(
-            manager,
-            oracle0,
-            stable0,
-            stable0Decimals,
-            oracle1,
-            stable1,
-            stable1Decimals
-        );
+        bytes memory constructorArgs =
+            abi.encode(manager, oracle0, stable0, stable0Decimals, oracle1, stable1, stable1Decimals);
 
-        (address hookAddress, bytes32 salt) = HookMiner.find(
-            CREATE2_DEPLOYER,
-            flags,
-            type(OscillonHook).creationCode,
-            constructorArgs
-        );
+        (address hookAddress, bytes32 salt) =
+            HookMiner.find(CREATE2_DEPLOYER, flags, type(OscillonHook).creationCode, constructorArgs);
 
         vm.broadcast();
         OscillonHook deployed = new OscillonHook{salt: salt}(
